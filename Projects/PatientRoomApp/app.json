@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "Patient Room App",
+    "slug": "patient-room-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      "expo-status-bar"
+    ]
+  }
+}
