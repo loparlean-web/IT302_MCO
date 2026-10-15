@@ -1,4 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  encryptJSON,
+  decryptJSON,
+  isEncrypted,
+  hashPassword,
+  verifyPassword,
+  isPasswordHash,
+} from './encryption';
 
 const K = {
   DB_VERSION: '@db_version',
@@ -14,16 +22,20 @@ const K = {
 
 const DB_VERSION = 4;
 
+// Everything written to AsyncStorage is encrypted (see encryption.js).
+// Data saved before encryption existed is plain JSON; it is still readable here
+// and gets encrypted the next time it is written.
 const get = async (key, fallback = null) => {
   try {
     const raw = await AsyncStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
+    if (!raw) return fallback;
+    return isEncrypted(raw) ? await decryptJSON(raw) : JSON.parse(raw);
   } catch {
     return fallback;
   }
 };
 
-const set = (key, value) => AsyncStorage.setItem(key, JSON.stringify(value));
+const set = async (key, value) => AsyncStorage.setItem(key, await encryptJSON(value));
 
 const makeId = (prefix) =>
   `${prefix}${Date.now()}${Math.floor(Math.random() * 900 + 100)}`;
@@ -72,7 +84,11 @@ const initDB = async () => {
   if (!hasUsers || currentVersion < DB_VERSION) {
     console.log(`[API] Seeding DB (v${currentVersion} → v${DB_VERSION})`);
 
-    await set(K.USERS, SEED_USERS);
+    // The `password` field always holds a hash, never the plain password
+    const seededUsers = await Promise.all(
+      SEED_USERS.map(async (u) => ({ ...u, password: await hashPassword(u.password) }))
+    );
+    await set(K.USERS, seededUsers);
     await set(K.ROOMS, SEED_ROOMS);
     await set(K.RESERVATIONS, []);
     await set(K.BILLS, []);
@@ -95,10 +111,19 @@ export const API = {
   login: async (username, password) => {
     await delay();
     const users = await get(K.USERS, []);
-    const user = users.find(
-      (u) => u.username === username && u.password === password
-    );
+    const user = users.find((u) => u.username === username);
     if (!user) throw new Error('Invalid credentials');
+
+    if (isPasswordHash(user.password)) {
+      if (!(await verifyPassword(password, user.password))) {
+        throw new Error('Invalid credentials');
+      }
+    } else {
+      // Account created before password hashing: check once, then upgrade it to a hash
+      if (user.password !== password) throw new Error('Invalid credentials');
+      user.password = await hashPassword(password);
+      await set(K.USERS, users);
+    }
 
     const token = makeToken();
     const sessions = await get(K.SESSIONS, {});
@@ -117,11 +142,13 @@ export const API = {
       throw new Error('Username already exists');
     }
 
+    if (!payload.password) throw new Error('Password is required');
+
     const newUser = {
       id: makeId('P'),
       role: 'patient',
       username: payload.username,
-      password: payload.password,
+      password: await hashPassword(payload.password),
       name: payload.name,
       phone: payload.phone || '',
       email: payload.email || '',
